@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, type ReactNode, type TouchEvent as ReactTouchEvent } from 'react';
 import {
-  Camera, BookOpen, HelpCircle, PenTool, Layers, GitCompare,
-  ChevronLeft, ChevronRight, CheckCircle2, XCircle, Lightbulb, Star, Trophy,
-  ZoomIn, Maximize2, Flame, RotateCcw, Home
+  Flower2, BookOpen, HelpCircle, PenTool, Layers, GitCompare,
+  ChevronLeft, ChevronRight, CheckCircle2, XCircle, Lightbulb, Star,
+  Swords, Sprout, Flame, RotateCcw, Home
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -15,7 +15,7 @@ import type { MascotExpression } from './Mascot';
 
 type Screen = 'title' | 'onboarding' | 'learn';
 type Mode = 'read' | 'quiz' | 'kanji' | 'structure' | 'contrast';
-type Cell = 'up-know' | 'up-unknow' | 'loose-know' | 'loose-unknow';
+type Cell = 'war-life' | 'war-cosmos' | 'after-life' | 'after-cosmos';
 
 interface WrongEntry {
   questionId: number;
@@ -23,22 +23,31 @@ interface WrongEntry {
   lastWrong: string; // YYYY-MM-DD
 }
 
+// 場面の区切り（時代・場面）ごとの色
 const SECTION_COLOR: Record<Paragraph['section'], string> = {
-  hajime: 'border-teal-400 bg-teal-50',
-  naka: 'border-stone-300 bg-white',
-  owari: 'border-teal-400 bg-teal-50',
+  war: 'border-orange-300 bg-orange-50',
+  parting: 'border-rose-400 bg-rose-50',
+  after: 'border-emerald-400 bg-emerald-50',
 };
 
 const SECTION_LABEL: Record<Paragraph['section'], string> = {
-  hajime: '初め',
-  naka: '中',
-  owari: '終わり',
+  war: '戦争中',
+  parting: '別れ',
+  after: '十年後',
 };
 
-const CONTRAST_SIDE_COLOR: Record<NonNullable<Paragraph['contrast']>['side'], string> = {
-  up: 'border-amber-400 bg-amber-50',
-  loose: 'border-sky-400 bg-sky-50',
-  both: 'border-stone-300 bg-stone-50',
+const SECTION_BADGE: Record<Paragraph['section'], string> = {
+  war: 'bg-orange-500 text-white',
+  parting: 'bg-rose-500 text-white',
+  after: 'bg-emerald-500 text-white',
+};
+
+// 登場人物ごとのラベル（心情カードの見出し）
+const WHO_LABEL: Record<NonNullable<Paragraph['feeling']>['who'], string> = {
+  yumi: 'ゆみ子',
+  father: 'お父さん',
+  mother: 'お母さん',
+  theme: '物語のテーマ',
 };
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -103,7 +112,7 @@ export default function App() {
 
   // Contrast table mode
   const [placedChips, setPlacedChips] = useState<Record<Cell, number[]>>({
-    'up-know': [], 'up-unknow': [], 'loose-know': [], 'loose-unknow': []
+    'war-life': [], 'war-cosmos': [], 'after-life': [], 'after-cosmos': []
   });
   const [selectedChipId, setSelectedChipId] = useState<number | null>(null);
   const [contrastFeedback, setContrastFeedback] = useState<{ cell: Cell; ok: boolean } | null>(null);
@@ -473,13 +482,13 @@ export default function App() {
     setTimeout(() => setContrastFeedback(null), 800);
   };
   const handleResetContrast = () => {
-    setPlacedChips({ 'up-know': [], 'up-unknow': [], 'loose-know': [], 'loose-unknow': [] });
+    setPlacedChips({ 'war-life': [], 'war-cosmos': [], 'after-life': [], 'after-cosmos': [] });
     setSelectedChipId(null);
     setContrastFeedback(null);
   };
   const contrastComplete =
-    placedChips['up-know'].length === 1 && placedChips['up-unknow'].length === 1 &&
-    placedChips['loose-know'].length === 1 && placedChips['loose-unknow'].length === 1;
+    placedChips['war-life'].length === 1 && placedChips['war-cosmos'].length === 1 &&
+    placedChips['after-life'].length === 1 && placedChips['after-cosmos'].length === 1;
 
   // ── renderText ──────────────────────────────────────────────────────────────
   // In review mode we show the page the current review question belongs to
@@ -711,10 +720,10 @@ export default function App() {
           </button>
           <div className="min-w-0">
             <h1 className="text-base lg:text-lg font-bold text-stone-700 flex items-center gap-1.5 truncate">
-              <Camera className="text-blue-500 shrink-0" size={18} aria-label="カメラ" />
-              アップとルーズで伝える
+              <Flower2 className="text-pink-500 shrink-0" size={18} aria-label="コスモス" />
+              一つの花
             </h1>
-            <p className="text-[10px] text-stone-500 ml-6 truncate">中谷 日出 ／ 光村図書 4年上</p>
+            <p className="text-[10px] text-stone-500 ml-6 truncate">今西 祐行 ／ 光村図書 4年</p>
           </div>
           <div className="flex items-center gap-1.5 ml-1 shrink-0">
             <div className={`flex items-center gap-1 px-2 py-1 rounded-full font-bold border-2 text-xs ${cycleBadge(cycleCount).cls}`} title={`現在 ${cycleBadge(cycleCount).label}`}>
@@ -741,11 +750,11 @@ export default function App() {
             </div>
           )}
           <div className="flex gap-0.5 bg-stone-100 p-0.5 rounded-lg">
-            <ModeButton active={mode === 'read'} onClick={() => { setReviewMode(false); setMode('read'); }} icon={<BookOpen size={16} />} label="読む" color="teal" />
+            <ModeButton active={mode === 'read'} onClick={() => { setReviewMode(false); setMode('read'); }} icon={<BookOpen size={16} />} label="読む" color="emerald" />
             <ModeButton active={mode === 'quiz' || reviewMode} onClick={() => { setReviewMode(false); setMode('quiz'); }} icon={<HelpCircle size={16} />} label="問題" color="amber" />
             <ModeButton active={mode === 'kanji'} onClick={() => { setReviewMode(false); setMode('kanji'); }} icon={<PenTool size={16} />} label="漢字" color="indigo" />
-            <ModeButton active={mode === 'structure'} onClick={() => { setReviewMode(false); setMode('structure'); }} icon={<Layers size={16} />} label="構成" color="teal" />
-            <ModeButton active={mode === 'contrast'} onClick={() => { setReviewMode(false); setMode('contrast'); }} icon={<GitCompare size={16} />} label="対比" color="sky" />
+            <ModeButton active={mode === 'structure'} onClick={() => { setReviewMode(false); setMode('structure'); }} icon={<Layers size={16} />} label="場面" color="emerald" />
+            <ModeButton active={mode === 'contrast'} onClick={() => { setReviewMode(false); setMode('contrast'); }} icon={<GitCompare size={16} />} label="対比" color="pink" />
           </div>
         </div>
       </header>
@@ -864,29 +873,19 @@ export default function App() {
               {!reviewMode && mode === 'read' && (
                 <div className="flex-1 flex flex-col">
                   <div className="flex justify-between items-center mb-3 pb-2 border-b border-teal-100">
-                    <h2 className="text-xl font-bold text-teal-600 flex items-center gap-2">
-                      <BookOpen /> だん落ごとに読もう
+                    <h2 className="text-xl font-bold text-emerald-600 flex items-center gap-2">
+                      <BookOpen /> 場面ごとに読もう
                     </h2>
-                    <span className="text-xs text-teal-700 font-bold bg-teal-50 border border-teal-200 px-3 py-1 rounded-full">
+                    <span className="text-xs text-emerald-700 font-bold bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-full">
                       {readParaNum} / {structure.length}
                     </span>
                   </div>
 
                   <div className="flex items-center gap-2 mb-3">
-                    <span className={`text-xs font-bold px-2 py-1 rounded-full ${
-                      readPara.section === 'hajime' ? 'bg-teal-500 text-white'
-                        : readPara.section === 'owari' ? 'bg-teal-500 text-white'
-                        : readPara.contrast?.side === 'up' ? 'bg-amber-500 text-white'
-                        : readPara.contrast?.side === 'loose' ? 'bg-sky-500 text-white'
-                        : 'bg-stone-500 text-white'
-                    }`}>
-                      {readPara.section === 'hajime' ? SECTION_LABEL.hajime
-                        : readPara.section === 'owari' ? SECTION_LABEL.owari
-                        : readPara.contrast?.side === 'up' ? 'アップ'
-                        : readPara.contrast?.side === 'loose' ? 'ルーズ'
-                        : SECTION_LABEL.naka}
+                    <span className={`text-xs font-bold px-2 py-1 rounded-full ${SECTION_BADGE[readPara.section]}`}>
+                      {SECTION_LABEL[readPara.section]}
                     </span>
-                    <span className="text-sm font-bold text-stone-700">¶{readPara.num}　{readPara.role}</span>
+                    <span className="text-sm font-bold text-stone-700">{readPara.role}</span>
                   </div>
 
                   <div className="flex-1 bg-stone-50 rounded-2xl border border-stone-200 p-5 overflow-y-auto leading-loose text-lg text-stone-800 font-serif">
@@ -908,27 +907,27 @@ export default function App() {
                     <button
                       onClick={() => handleStepRead(-1)}
                       disabled={readParaNum === 1}
-                      className="flex items-center gap-1 px-4 py-2 bg-white border border-teal-200 rounded-full text-teal-700 font-bold disabled:opacity-30 hover:bg-teal-50"
+                      className="flex items-center gap-1 px-4 py-2 bg-white border border-emerald-200 rounded-full text-emerald-700 font-bold disabled:opacity-30 hover:bg-emerald-50"
                     >
-                      <ChevronLeft size={18} /> 前のだん落
+                      <ChevronLeft size={18} /> 前の場面
                     </button>
                     <button
                       onClick={() => handleStepRead(1)}
                       disabled={readParaNum === structure.length}
-                      className="flex items-center gap-1 px-4 py-2 bg-teal-500 text-white rounded-full font-bold disabled:opacity-30 hover:bg-teal-600"
+                      className="flex items-center gap-1 px-4 py-2 bg-emerald-500 text-white rounded-full font-bold disabled:opacity-30 hover:bg-emerald-600"
                     >
-                      次のだん落 <ChevronRight size={18} />
+                      次の場面 <ChevronRight size={18} />
                     </button>
                   </div>
 
-                  <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
-                    <div className="bg-amber-50 border border-amber-200 rounded-xl p-2 text-amber-700">
-                      <ZoomIn className="inline" size={14} /> <span className="font-bold">アップ</span>=細かい部分を大きく
+                  {readPara.feeling && (
+                    <div className="mt-4 bg-rose-50 border border-rose-200 rounded-xl p-3 text-sm">
+                      <div className="font-bold text-rose-600 mb-1 flex items-center gap-1">
+                        <Sprout size={15} /> 読みどころ（{WHO_LABEL[readPara.feeling.who]}）
+                      </div>
+                      <p className="text-stone-700">{readPara.feeling.point}</p>
                     </div>
-                    <div className="bg-sky-50 border border-sky-200 rounded-xl p-2 text-sky-700">
-                      <Maximize2 className="inline" size={14} /> <span className="font-bold">ルーズ</span>=広いはんい
-                    </div>
-                  </div>
+                  )}
                 </div>
               )}
 
@@ -1042,57 +1041,45 @@ export default function App() {
 
               {!reviewMode && mode === 'structure' && (
                 <div className="flex-1 flex flex-col">
-                  <div className="flex justify-between items-center mb-3 pb-2 border-b border-teal-100">
-                    <h2 className="text-xl font-bold text-teal-600 flex items-center gap-2">
-                      <Layers /> 文章の組み立てマップ
+                  <div className="flex justify-between items-center mb-3 pb-2 border-b border-emerald-100">
+                    <h2 className="text-xl font-bold text-emerald-600 flex items-center gap-2">
+                      <Layers /> 場面の組み立てマップ
                     </h2>
-                    <span className="bg-teal-100 text-teal-700 px-3 py-1 rounded-full text-xs font-bold">初め・中・終わり</span>
+                    <span className="bg-emerald-100 text-emerald-700 px-3 py-1 rounded-full text-xs font-bold">時の流れで読む</span>
                   </div>
                   <p className="text-stone-600 mb-4 text-sm">
-                    8つのだん落のはたらきを見てみよう。カードをタップすると、左の本文のだん落へジャンプするよ。
-                    <span className="text-teal-700 font-bold">初め・終わり</span>はティール、<span className="text-amber-600 font-bold">アップのだん落</span>はアンバー、<span className="text-sky-600 font-bold">ルーズのだん落</span>はスカイで色分けされているよ。
+                    物語の場面のはたらきを見てみよう。カードをタップすると、左の本文へジャンプし、<span className="text-emerald-700 font-bold">読みどころ</span>が開くよ。
+                    <span className="text-orange-600 font-bold">戦争中</span>・<span className="text-rose-600 font-bold">別れ</span>・<span className="text-emerald-600 font-bold">十年後</span>で色分けされているよ。
                   </p>
                   <div className="flex flex-col gap-3">
                     {structure.map(p => {
-                      const isAmber = p.contrast?.side === 'up';
-                      const isSky = p.contrast?.side === 'loose';
-                      const tone = p.section !== 'naka'
-                        ? SECTION_COLOR[p.section]
-                        : isAmber ? CONTRAST_SIDE_COLOR.up
-                        : isSky ? CONTRAST_SIDE_COLOR.loose
-                        : 'border-stone-300 bg-white';
-                      const sectionBadge =
-                        p.section === 'hajime' ? { label: SECTION_LABEL.hajime, cls: 'bg-teal-500 text-white' }
-                        : p.section === 'owari' ? { label: SECTION_LABEL.owari, cls: 'bg-teal-500 text-white' }
-                        : isAmber ? { label: 'アップ', cls: 'bg-amber-500 text-white' }
-                        : isSky ? { label: 'ルーズ', cls: 'bg-sky-500 text-white' }
-                        : { label: SECTION_LABEL.naka, cls: 'bg-stone-500 text-white' };
+                      const tone = SECTION_COLOR[p.section];
                       const isExpanded = expandedPara === p.num;
                       return (
                         <button
                           key={p.num}
                           onClick={() => handleSelectParagraph(p)}
-                          className={`text-left rounded-xl border-2 p-4 transition-all hover:shadow-md ${tone} ${isExpanded ? 'shadow-md ring-2 ring-teal-300' : ''}`}
+                          className={`text-left rounded-xl border-2 p-4 transition-all hover:shadow-md ${tone} ${isExpanded ? 'shadow-md ring-2 ring-emerald-300' : ''}`}
                         >
                           <div className="flex items-center gap-3">
                             <div className="w-10 h-10 rounded-full bg-white flex items-center justify-center font-bold text-stone-700 border border-stone-200 shrink-0">
-                              ¶{p.num}
+                              {p.num}
                             </div>
                             <div className="flex-1">
                               <div className="flex items-center gap-2 mb-1">
-                                <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${sectionBadge.cls}`}>{sectionBadge.label}</span>
+                                <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${SECTION_BADGE[p.section]}`}>{SECTION_LABEL[p.section]}</span>
                                 <span className="font-bold text-stone-700">{p.role}</span>
                               </div>
                               <div className="text-sm text-stone-600">{p.summary}</div>
-                              {isExpanded && p.contrast && (
-                                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="mt-3 grid grid-cols-2 gap-2">
-                                  <div className="bg-white/80 rounded-lg p-2 border border-green-200">
-                                    <div className="text-xs font-bold text-green-700 mb-1">わかること</div>
-                                    <div className="text-xs text-stone-700">{p.contrast.knowable}</div>
+                              {isExpanded && p.feeling && (
+                                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="mt-3 flex flex-col gap-2">
+                                  <div className="bg-white/80 rounded-lg p-2 border border-emerald-200">
+                                    <div className="text-xs font-bold text-emerald-700 mb-1">読みどころ（{WHO_LABEL[p.feeling.who]}の気持ち）</div>
+                                    <div className="text-xs text-stone-700">{p.feeling.point}</div>
                                   </div>
-                                  <div className="bg-white/80 rounded-lg p-2 border border-red-200">
-                                    <div className="text-xs font-bold text-red-700 mb-1">わからないこと</div>
-                                    <div className="text-xs text-stone-700">{p.contrast.unknowable}</div>
+                                  <div className="bg-white/80 rounded-lg p-2 border border-amber-200">
+                                    <div className="text-xs font-bold text-amber-700 mb-1">考えてみよう</div>
+                                    <div className="text-xs text-stone-700">{p.feeling.deep}</div>
                                   </div>
                                 </motion.div>
                               )}
@@ -1107,26 +1094,26 @@ export default function App() {
 
               {!reviewMode && mode === 'contrast' && (
                 <div className="flex-1 flex flex-col">
-                  <h2 className="text-xl font-bold text-sky-600 flex items-center gap-2 mb-3 pb-2 border-b border-sky-100">
-                    <GitCompare /> アップ ⇄ ルーズ 対比表
+                  <h2 className="text-xl font-bold text-pink-600 flex items-center gap-2 mb-3 pb-2 border-b border-pink-100">
+                    <GitCompare /> 戦争中 ⇄ 十年後 対比表
                   </h2>
                   <p className="text-stone-600 text-sm mb-4">
                     下の<strong>カード</strong>をタップ → <strong>表のマス</strong>をタップ で入れていこう。<br />
-                    正しいマスに入ると残るよ。まちがえると赤く光って戻るからもう一度考えてみよう。
+                    「くらし（食べ物）」と「コスモス（お父さんの花）」が、戦争中と十年後でどう変わったか整理しよう。
                   </p>
 
                   <div className="grid grid-cols-3 gap-2 mb-4">
                     <div></div>
-                    <div className="text-center text-xs font-bold text-green-700 bg-green-50 rounded-lg py-2">わかること</div>
-                    <div className="text-center text-xs font-bold text-red-700 bg-red-50 rounded-lg py-2">わからないこと</div>
+                    <div className="text-center text-xs font-bold text-amber-700 bg-amber-50 rounded-lg py-2 flex items-center justify-center">くらし<br />（食べ物）</div>
+                    <div className="text-center text-xs font-bold text-pink-700 bg-pink-50 rounded-lg py-2 flex items-center justify-center">コスモス<br />（花）</div>
 
-                    <div className="flex items-center justify-center text-sm font-bold text-amber-700 bg-amber-100 rounded-lg">アップ</div>
-                    <Cell2x2 cell="up-know" placed={placedChips} chips={contrastChips} feedback={contrastFeedback} onPlace={handlePlaceChip} />
-                    <Cell2x2 cell="up-unknow" placed={placedChips} chips={contrastChips} feedback={contrastFeedback} onPlace={handlePlaceChip} />
+                    <div className="flex items-center justify-center text-sm font-bold text-orange-700 bg-orange-100 rounded-lg">戦争中</div>
+                    <Cell2x2 cell="war-life" placed={placedChips} chips={contrastChips} feedback={contrastFeedback} onPlace={handlePlaceChip} />
+                    <Cell2x2 cell="war-cosmos" placed={placedChips} chips={contrastChips} feedback={contrastFeedback} onPlace={handlePlaceChip} />
 
-                    <div className="flex items-center justify-center text-sm font-bold text-sky-700 bg-sky-100 rounded-lg">ルーズ</div>
-                    <Cell2x2 cell="loose-know" placed={placedChips} chips={contrastChips} feedback={contrastFeedback} onPlace={handlePlaceChip} />
-                    <Cell2x2 cell="loose-unknow" placed={placedChips} chips={contrastChips} feedback={contrastFeedback} onPlace={handlePlaceChip} />
+                    <div className="flex items-center justify-center text-sm font-bold text-emerald-700 bg-emerald-100 rounded-lg">十年後</div>
+                    <Cell2x2 cell="after-life" placed={placedChips} chips={contrastChips} feedback={contrastFeedback} onPlace={handlePlaceChip} />
+                    <Cell2x2 cell="after-cosmos" placed={placedChips} chips={contrastChips} feedback={contrastFeedback} onPlace={handlePlaceChip} />
                   </div>
 
                   <div className="mb-4">
@@ -1150,11 +1137,12 @@ export default function App() {
                   </div>
 
                   {contrastComplete && (
-                    <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mt-auto bg-teal-50 border border-teal-200 rounded-xl p-4">
-                      <p className="font-bold text-teal-700 mb-1">完成！筆者の主張は——</p>
+                    <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mt-auto bg-pink-50 border border-pink-200 rounded-xl p-4">
+                      <p className="font-bold text-pink-700 mb-1">完成！この物語の主題は——</p>
                       <p className="text-stone-700 text-sm">
-                        アップとルーズには伝えられること／伝えられないことがあるからこそ、
-                        <strong>送り手は伝えたいことに合わせてアップとルーズを選んだり組み合わせたりする</strong>必要がある。
+                        くらし（食べ物）は「物がない戦争中」から「豊かな十年後」へ大きく<strong>変わった</strong>。
+                        でも、お父さんがくれた<strong>「一輪」のコスモスが「いっぱい」に増えた</strong>ように、
+                        ゆみ子を思うお父さんの愛と平和への願いは、形を変えて今も<strong>変わらず</strong>ゆみ子を包んでいる。
                       </p>
                     </motion.div>
                   )}
@@ -1338,7 +1326,7 @@ function Cell2x2({
   const chipId = placed[cell][0];
   const chip = chipId != null ? chips.find(c => c.id === chipId) : null;
   const fb = feedback && feedback.cell === cell ? feedback : null;
-  const baseColor = cell.startsWith('up-') ? 'border-amber-200' : 'border-sky-200';
+  const baseColor = cell.endsWith('-cosmos') ? 'border-pink-200' : 'border-amber-200';
   const flash =
     fb?.ok === false ? 'bg-red-200 border-red-400 animate-pulse' :
     fb?.ok === true ? 'bg-green-100 border-green-400' :
@@ -1365,19 +1353,19 @@ function ModeButton({
   onClick: () => void;
   icon: ReactNode;
   label: string;
-  color: 'teal' | 'amber' | 'indigo' | 'sky';
+  color: 'emerald' | 'amber' | 'indigo' | 'pink';
 }) {
   const colorMap: Record<typeof color, string> = {
-    teal: 'bg-teal-500 text-white shadow-md',
+    emerald: 'bg-emerald-500 text-white shadow-md',
     amber: 'bg-amber-500 text-white shadow-md',
     indigo: 'bg-indigo-500 text-white shadow-md',
-    sky: 'bg-sky-500 text-white shadow-md',
+    pink: 'bg-pink-500 text-white shadow-md',
   };
   const inactiveColorMap: Record<typeof color, string> = {
-    teal: 'text-teal-700 hover:bg-teal-100',
+    emerald: 'text-emerald-700 hover:bg-emerald-100',
     amber: 'text-amber-700 hover:bg-amber-100',
     indigo: 'text-indigo-700 hover:bg-indigo-100',
-    sky: 'text-sky-700 hover:bg-sky-100',
+    pink: 'text-pink-700 hover:bg-pink-100',
   };
   return (
     <button

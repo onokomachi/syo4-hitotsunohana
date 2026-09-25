@@ -185,13 +185,7 @@ export default function App() {
     syncToPortal(clearCount, wrongLog, getHistory());
   }, [clearCount, wrongLog]);
 
-  // できないまま別の設問へ移ったら、その問題を「とちゅうでやめた」として残す。
-  // これが無いと、できなかった問題ほど記録から消える
-  useEffect(() => {
-    flushAbandoned(currentQuestion?.id);
-  }, [currentQuestion?.id]);
-
-  // 画面を閉じるときにも同じことをする
+  // 画面を閉じるときにも、とちゅうでやめた問題を残す（下の currentQuestion の effect と同じ）
   useEffect(() => {
     const onLeave = () => flushAbandoned();
     window.addEventListener('pagehide', onLeave);
@@ -323,6 +317,14 @@ export default function App() {
   const pageQuestions = questions.filter(q => q.pageId === currentPage.id);
   const normalQuestion = pageQuestions[currentQuestionIndex];
   const currentQuestion: Question | undefined = reviewMode ? reviewQueue[reviewIdx] : normalQuestion;
+
+  // ↓ currentQuestion を宣言したあとに置く。上に置くと、描画のたびに
+  //   「宣言前の変数を読んだ」エラー（TDZ）で画面が真っ白になる
+  // できないまま別の設問へ移ったら、その問題を「とちゅうでやめた」として残す。
+  // これが無いと、できなかった問題ほど記録から消える
+  useEffect(() => {
+    flushAbandoned(currentQuestion?.id);
+  }, [currentQuestion?.id]);
 
   const currentKanjiList = kanjiList.filter(k => k.pageId === currentPage.id);
 

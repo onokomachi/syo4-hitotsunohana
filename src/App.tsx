@@ -1,58 +1,130 @@
-import { useState, useEffect, useRef, type ReactNode, type TouchEvent as ReactTouchEvent } from 'react';
+import { useState, useEffect, useRef, useMemo, Fragment, type ReactNode, type TouchEvent as ReactTouchEvent } from 'react';
 import {
-  Flower2, BookOpen, HelpCircle, PenTool, Layers, GitCompare,
+  PawPrint, BookOpen, HelpCircle, PenTool, Layers, GitCompare,
   ChevronLeft, ChevronRight, CheckCircle2, XCircle, Lightbulb, Star,
-  Swords, Sprout, Flame, RotateCcw, Home
+  Sprout, Flame, RotateCcw, Home, ClipboardCheck, Target
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   pages, questions, kanjiList, structure, contrastChips, rubyMap,
-  type Kanji, type Paragraph, type ContrastChip, type Question
+  SKILLS, SKILL_ORDER, MISREADS,
+  type Kanji, type Paragraph, type ContrastChip, type Question, type Skill
 } from './data';
 import { TitleScreen, OnboardingSlides } from './TitleScreen';
+import { UNIT, SECTIONS, STRUCTURE, WHO_LABEL, CONTRAST } from './unit';
 import { MascotPinto, SpeechBubble } from './Mascot';
 import type { MascotExpression } from './Mascot';
 import { syncToPortal } from './lib/portal';
 import { noteCorrect, noteWrong, flushAbandoned, getHistory } from './lib/history';
+import { forceSolo } from 'learning-app-kit/sync';
 
 type Screen = 'title' | 'onboarding' | 'learn';
 type Mode = 'read' | 'quiz' | 'kanji' | 'structure' | 'contrast';
-type Cell = 'war-life' | 'war-cosmos' | 'after-life' | 'after-cosmos';
+type Cell = string;
 
 interface WrongEntry {
   questionId: number;
   wrongCount: number;
   lastWrong: string; // YYYY-MM-DD
+  cleared?: string;  // まちがえたあと、別の日に1回でできた日。ふりかえりから外す
 }
 
-// 場面の区切り（時代・場面）ごとの色
-const SECTION_COLOR: Record<Paragraph['section'], string> = {
-  war: 'border-orange-300 bg-orange-50',
-  parting: 'border-rose-400 bg-rose-50',
-  after: 'border-emerald-400 bg-emerald-50',
-};
+type SessionKind = 'review' | 'test' | 'skill';
 
-const SECTION_LABEL: Record<Paragraph['section'], string> = {
-  war: '戦争中',
-  parting: '別れ',
-  after: '十年後',
-};
+// 場面の区切り・人物の呼び名は単元ごとにちがうので unit.ts に置く
+const SECTION_COLOR = (k: string) => SECTIONS[k]?.card ?? 'border-stone-300 bg-stone-50';
+const SECTION_LABEL = (k: string) => SECTIONS[k]?.label ?? k;
+const SECTION_BADGE = (k: string) => SECTIONS[k]?.badge ?? 'bg-stone-500 text-white';
+const whoLabel = (k: string) => WHO_LABEL[k] ?? k;
+const CELLS: Cell[] = CONTRAST.rows.flatMap(r => CONTRAST.cols.map(c => `${r.key}-${c.key}`));
+const emptyCells = (): Record<Cell, number[]> => Object.fromEntries(CELLS.map(c => [c, []]));
 
-const SECTION_BADGE: Record<Paragraph['section'], string> = {
-  war: 'bg-orange-500 text-white',
-  parting: 'bg-rose-500 text-white',
-  after: 'bg-emerald-500 text-white',
-};
-
-// 登場人物ごとのラベル（心情カードの見出し）
-const WHO_LABEL: Record<NonNullable<Paragraph['feeling']>['who'], string> = {
-  yumi: 'ゆみ子',
-  father: 'お父さん',
-  mother: 'お母さん',
-  theme: '物語のテーマ',
-};
+// **〜** を太字にする（unit.ts の文章用）
+function Bold({ text }: { text: string }) {
+  return <>{text.split('**').map((t, i) => (i % 2 ? <strong key={i}>{t}</strong> : <span key={i}>{t}</span>))}</>;
+}
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
+
+// 読みの力ごとの色（問題の上に出す小さな札）
+const SKILL_CHIP: Record<Skill, string> = {
+  kotoba: 'bg-sky-100 text-sky-700 border-sky-200',
+  yousu: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+  kimochi: 'bg-rose-100 text-rose-700 border-rose-200',
+  henka: 'bg-violet-100 text-violet-700 border-violet-200',
+  kangae: 'bg-amber-100 text-amber-700 border-amber-200',
+};
+
+// 場面の中では「ことば → ようす → 気持ち → うつりかわり → まとめ」の順に出す
+const bySkill = (a: Question, b: Question) =>
+  SKILL_ORDER.indexOf(a.skill) - SKILL_ORDER.indexOf(b.skill);
+
+const TEST_SIZE = 10;
+const LAST_TEST_KEY = `${UNIT.appId}_last_test_v1`;
+
+// ぬき出しは3回まで（ふだん）。当てずっぽうに選び直し続けて当てる、を止める
+const EXTRACT_MAX_TRIES = 3;
+
+function shuffle<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j]!, a[i]!];
+  }
+  return a;
+}
+
+// まとめテストの10問。紙の単元テストと同じく、どの場面からも出し、読みの力もかたよらせない。
+// 前回のテストに出た問題は後回しにする（続けて受けても同じ問題にならない）。
+// 記述は自分で見くらべる形なので、テストには入れない。
+function buildTestQueue(): Question[] {
+  let last: number[] = [];
+  try { last = JSON.parse(localStorage.getItem(LAST_TEST_KEY) ?? '[]'); } catch { /* noop */ }
+  const pool = questions.filter(q => q.type !== 'free');
+  const fresh = shuffle(pool.filter(q => !last.includes(q.id)));
+  const shuffled = [...fresh, ...shuffle(pool.filter(q => last.includes(q.id)))];
+  const picked: Question[] = [];
+  for (const p of pages) {
+    const q = shuffled.find(x => x.pageId === p.id);
+    if (q) picked.push(q);
+  }
+  const count = (s: Skill) => picked.filter(q => q.skill === s).length;
+  const isLast = (q: Question) => (last.includes(q.id) ? 1 : 0);
+  while (picked.length < Math.min(TEST_SIZE, pool.length)) {
+    const rest = shuffled.filter(q => !picked.includes(q));
+    // まだ少ない力の問題から先に足す。同じなら、前回出ていない問題を先に
+    rest.sort((a, b) => count(a.skill) - count(b.skill) || isLast(a) - isLast(b));
+    picked.push(rest[0]!);
+  }
+  try { localStorage.setItem(LAST_TEST_KEY, JSON.stringify(picked.map(q => q.id))); } catch { /* noop */ }
+  return picked.sort((a, b) => a.pageId - b.pageId || bySkill(a, b));
+}
+
+// ぬき出しの答え合わせ。選びすぎ（本文をまるごと選ぶ等）・短すぎは不正解
+function judgeExtract(q: Question, selected: string): 'ok' | 'long' | 'short' | 'wrong' {
+  const answers = Array.isArray(q.answer) ? q.answer.map(a => a.trim()) : [];
+  const sel = selected;
+  if (q.charCount) return answers.some(a => sel.length === q.charCount && sel === a) ? 'ok' : 'wrong';
+  for (const a of answers) {
+    if (sel === a) return 'ok';
+    // 正解の±20%（最低2文字）まで、境界のタップのずれとして許す
+    const tolerance = Math.max(2, Math.ceil(a.length * 0.2));
+    if (a.includes(sel) && sel.length >= a.length - tolerance) return 'ok';
+    if (sel.includes(a) && sel.length <= a.length + tolerance) return 'ok';
+  }
+  const longest = Math.max(...answers.map(a => a.length));
+  const shortest = Math.min(...answers.map(a => a.length));
+  if (sel.length > longest + Math.max(2, Math.ceil(longest * 0.2))) return 'long';
+  if (sel.length < Math.max(2, shortest - Math.max(2, Math.ceil(shortest * 0.2)))) return 'short';
+  return 'wrong';
+}
+
+// 答えの文（テストでまちがえたときに見せる）
+function answerText(q: Question): string {
+  if (q.type === 'choice' && typeof q.answer === 'number') return q.choices?.[q.answer] ?? '';
+  if (Array.isArray(q.answer)) return q.answer[0] ?? '';
+  return '';
+}
 
 // 周回バッジ: 1=銀 2=金 3=プラチナ 4+=虹
 function cycleBadge(cycle: number): { label: string; cls: string; icon: string } {
@@ -84,6 +156,12 @@ export default function App() {
   const [reviewMode, setReviewMode] = useState(false);
   const [reviewQueue, setReviewQueue] = useState<Question[]>([]);
   const [reviewIdx, setReviewIdx] = useState(0);
+  // ふりかえり（まちがえた問題）か、まとめテストか
+  const [sessionKind, setSessionKind] = useState<SessionKind>('review');
+  const [sessionSkill, setSessionSkill] = useState<Skill | null>(null);
+  const [testResults, setTestResults] = useState<Record<number, boolean>>({});
+  const [testQuestions, setTestQuestions] = useState<Question[]>([]);
+  const [showTestResult, setShowTestResult] = useState(false);
 
   // ── Learning state ──────────────────────────────────────────────────────────
   const [currentPageIndex, setCurrentPageIndex] = useState(0);
@@ -104,6 +182,13 @@ export default function App() {
   const [hintLevel, setHintLevel] = useState<0 | 1 | 2 | 3>(0);
   const [freeTextAnswer, setFreeTextAnswer] = useState('');
   const [showSampleAnswer, setShowSampleAnswer] = useState(false);
+  const [lastChoice, setLastChoice] = useState<number | null>(null);
+  const [wrongChoices, setWrongChoices] = useState<number[]>([]);
+  const [extractTries, setExtractTries] = useState(0);
+  const [extractNote, setExtractNote] = useState<'long' | 'short' | null>(null);
+  // まちがえたあとの正解（メダルにならない）かどうか
+  const [lateCorrect, setLateCorrect] = useState(false);
+  const [selfCheck, setSelfCheck] = useState<'ok' | 'retry' | null>(null);
 
   // Structure mode
   const [expandedPara, setExpandedPara] = useState<number | null>(null);
@@ -113,9 +198,7 @@ export default function App() {
   const [readParaNum, setReadParaNum] = useState<number>(1);
 
   // Contrast table mode
-  const [placedChips, setPlacedChips] = useState<Record<Cell, number[]>>({
-    'war-life': [], 'war-cosmos': [], 'after-life': [], 'after-cosmos': []
-  });
+  const [placedChips, setPlacedChips] = useState<Record<Cell, number[]>>(emptyCells);
   const [selectedChipId, setSelectedChipId] = useState<number | null>(null);
   const [contrastFeedback, setContrastFeedback] = useState<{ cell: Cell; ok: boolean } | null>(null);
 
@@ -125,6 +208,16 @@ export default function App() {
   const [mascotBubble, setMascotBubble] = useState(false);
 
   const textContainerRef = useRef<HTMLDivElement>(null);
+
+  // Active question depends on mode
+  const currentPage = pages[currentPageIndex];
+  const pageQuestions = questions.filter(q => q.pageId === currentPage.id).sort(bySkill);
+  const normalQuestion = pageQuestions[currentQuestionIndex];
+  const currentQuestion: Question | undefined = reviewMode ? reviewQueue[reviewIdx] : normalQuestion;
+  const isTest = reviewMode && sessionKind === 'test';
+  // ぬき出しの答えを出しきった（テストは1回、ふだんは3回）
+  const extractLocked = currentQuestion?.type === 'extract' && quizFeedback !== 'correct' &&
+    (isTest ? quizFeedback !== null : extractTries >= EXTRACT_MAX_TRIES);
 
   // ── localStorage init ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -185,7 +278,13 @@ export default function App() {
     syncToPortal(clearCount, wrongLog, getHistory());
   }, [clearCount, wrongLog]);
 
-  // 画面を閉じるときにも、とちゅうでやめた問題を残す（下の currentQuestion の effect と同じ）
+  // できないまま別の設問へ移ったら、その問題を「とちゅうでやめた」として残す。
+  // これが無いと、できなかった問題ほど記録から消える
+  useEffect(() => {
+    flushAbandoned(currentQuestion?.id);
+  }, [currentQuestion?.id]);
+
+  // 画面を閉じるときにも同じことをする
   useEffect(() => {
     const onLeave = () => flushAbandoned();
     window.addEventListener('pagehide', onLeave);
@@ -216,6 +315,12 @@ export default function App() {
     setHintLevel(0);
     setFreeTextAnswer('');
     setShowSampleAnswer(false);
+    setLastChoice(null);
+    setWrongChoices([]);
+    setExtractTries(0);
+    setExtractNote(null);
+    setLateCorrect(false);
+    setSelfCheck(null);
     setSelectedKanji(null);
     setCurrentQuestionIndex(0);
     setCustomSelection(null);
@@ -240,6 +345,16 @@ export default function App() {
   const recordCorrect = (questionId: number) => {
     // 時刻つきの記録。まちがえた回数もここで確定する
     noteCorrect(questionId);
+    // きょうまちがえた問題は、選び直して当てても「できた」にしない。
+    // 別の日にもう一度とけたときに初めてメダルになる（ふりかえりで日をあけて解き直す）
+    const today = todayStr();
+    const wrongToday = wrongLog.some(e => e.questionId === questionId && e.lastWrong === today);
+    setLateCorrect(wrongToday);
+    if (wrongToday) {
+      showMascot('celebrating', 'せいかい！あしたもう一度とこう！');
+      return;
+    }
+    setWrongLog(prev => prev.map(e => e.questionId === questionId ? { ...e, cleared: today } : e));
     const isFirstSolveThisCycle = !solvedQuestions.includes(questionId);
     if (isFirstSolveThisCycle) {
       setSolvedQuestions(prev => [...prev, questionId]);
@@ -247,7 +362,10 @@ export default function App() {
       setClearCount(prev => ({ ...prev, [questionId]: (prev[questionId] ?? 0) + 1 }));
     }
     const newCount = (clearCount[questionId] ?? 0) + (isFirstSolveThisCycle ? 1 : 0);
-    const msg = !isFirstSolveThisCycle ? 'もう一度せいかい！しっかり身についてるね！'
+    const sceneDone = !reviewMode && isFirstSolveThisCycle &&
+      pageQuestions.every(q => q.id === questionId || solvedQuestions.includes(q.id));
+    const msg = sceneDone ? 'この場面の問題、ぜんぶできた！'
+      : !isFirstSolveThisCycle ? 'もう一度せいかい！しっかり身についてるね！'
       : newCount >= 3 ? `すごい！${newCount}周目せいかい！マスターだね！`
       : newCount === 2 ? 'よくできた！2周目もせいかい！'
       : 'すごい！正解！よくできたね！';
@@ -269,62 +387,112 @@ export default function App() {
       }
       return [...prev, { questionId, wrongCount: 1, lastWrong: today }];
     });
-    showMascot('encouraging', 'おしい！ヒントを見てもう一度チャレンジ！');
+    showMascot('encouraging', isTest ? 'つぎの問題で取り返そう！' : 'おしい！ヒントを見てもう一度チャレンジ！');
   };
 
   // ── Review queue builder ─────────────────────────────────────────────────────
   const buildReviewQueue = (): Question[] => {
     const today = todayStr();
     return wrongLog
-      .filter(e => e.lastWrong < today)
+      .filter(e => e.lastWrong < today && !(e.cleared && e.cleared >= e.lastWrong))
       .map(e => questions.find(q => q.id === e.questionId))
       .filter((q): q is Question => q != null);
   };
 
   const reviewCount = buildReviewQueue().length;
 
-  const handleStartReview = () => {
-    const queue = buildReviewQueue();
-    if (queue.length === 0) return;
-    setReviewQueue(queue);
-    setReviewIdx(0);
-    setReviewMode(true);
+  // まちがえた回数がいちばん多い「読みの力」。タイトル画面で「にがて」として知らせる
+  const weakSkill: Skill | null = (() => {
+    const tally = new Map<Skill, number>();
+    for (const e of wrongLog) {
+      const q = questions.find(x => x.id === e.questionId);
+      if (q && !solvedQuestions.includes(q.id)) tally.set(q.skill, (tally.get(q.skill) ?? 0) + e.wrongCount);
+    }
+    let best: Skill | null = null;
+    for (const [k, v] of tally) if (best === null || v > (tally.get(best) ?? 0)) best = k;
+    return best;
+  })();
+
+  const resetQuizUi = () => {
     setQuizFeedback(null);
     setHintLevel(0);
     setFreeTextAnswer('');
     setShowSampleAnswer(false);
     setCustomSelection(null);
+    setLastChoice(null);
+    setWrongChoices([]);
+    setExtractTries(0);
+    setExtractNote(null);
+    setLateCorrect(false);
+    setSelfCheck(null);
+  };
+
+  const startSession = (kind: SessionKind, queue: Question[]) => {
+    if (queue.length === 0) return;
+    setSessionKind(kind);
+    setReviewQueue(queue);
+    setReviewIdx(0);
+    setReviewMode(true);
+    setMode('quiz');
+    resetQuizUi();
+    setScreen('learn');
+  };
+
+  const handleStartReview = () => {
+    // にがてな力の問題から先に出す
+    const queue = buildReviewQueue().sort((a, b) =>
+      (a.skill === weakSkill ? 0 : 1) - (b.skill === weakSkill ? 0 : 1) || a.pageId - b.pageId);
+    startSession('review', queue);
+  };
+
+  const handleStartTest = () => {
+    // まとめテストは実力を測る場面。ペア（1台を2人）のままなら、ここでひとりに切り替える（算数の本番テストと同じ）
+    forceSolo();
+    const queue = buildTestQueue();
+    setTestQuestions(queue);
+    setTestResults({});
+    startSession('test', queue);
+    showMascot('serious', 'ここからは本気モードだ…！');
+  };
+
+  // 身につけたい力ごとに、全部の場面から順に出す
+  const handleStartSkill = (skill: Skill) => {
+    setSessionSkill(skill);
+    startSession('skill', questions.filter(q => q.skill === skill).sort((a, b) => a.pageId - b.pageId || a.id - b.id));
+  };
+
+  // 授業で読んだ場面の問題から始める
+  const handleStartScene = (pageIndex: number) => {
+    setReviewMode(false);
+    setCurrentPageIndex(pageIndex);
+    setCurrentQuestionIndex(0);
+    resetQuizUi();
+    setMode('quiz');
     setScreen('learn');
   };
 
   const handleReviewNext = () => {
     if (reviewIdx < reviewQueue.length - 1) {
       setReviewIdx(i => i + 1);
-      setQuizFeedback(null);
-      setHintLevel(0);
-      setFreeTextAnswer('');
-      setShowSampleAnswer(false);
-      setCustomSelection(null);
+      resetQuizUi();
+      if (isTest) setMascotExpression('serious');
     } else {
       setReviewMode(false);
       setReviewQueue([]);
-      showMascot('celebrating', 'ふりかえり完了！よくがんばった！');
+      resetQuizUi();
+      if (isTest) {
+        setShowTestResult(true);
+      } else {
+        showMascot('celebrating', sessionKind === 'skill' ? 'この力の問題、ひととおりできた！' : 'ふりかえり完了！よくがんばった！');
+      }
     }
   };
 
-  // Active question depends on mode
-  const currentPage = pages[currentPageIndex];
-  const pageQuestions = questions.filter(q => q.pageId === currentPage.id);
-  const normalQuestion = pageQuestions[currentQuestionIndex];
-  const currentQuestion: Question | undefined = reviewMode ? reviewQueue[reviewIdx] : normalQuestion;
-
-  // ↓ currentQuestion を宣言したあとに置く。上に置くと、描画のたびに
-  //   「宣言前の変数を読んだ」エラー（TDZ）で画面が真っ白になる
-  // できないまま別の設問へ移ったら、その問題を「とちゅうでやめた」として残す。
-  // これが無いと、できなかった問題ほど記録から消える
-  useEffect(() => {
-    flushAbandoned(currentQuestion?.id);
-  }, [currentQuestion?.id]);
+  // テストの1回目の答えだけを結果に残す（やり直しで上書きしない）
+  const noteTestResult = (questionId: number, ok: boolean) => {
+    if (!isTest) return;
+    setTestResults(prev => (questionId in prev ? prev : { ...prev, [questionId]: ok }));
+  };
 
   const currentKanjiList = kanjiList.filter(k => k.pageId === currentPage.id);
 
@@ -372,15 +540,13 @@ export default function App() {
   const handleNextQuestion = () => {
     if (currentQuestionIndex < pageQuestions.length - 1) {
       setCurrentQuestionIndex(prev => prev + 1);
-      setQuizFeedback(null); setHintLevel(0);
-      setFreeTextAnswer(''); setShowSampleAnswer(false); setCustomSelection(null);
+      resetQuizUi();
     }
   };
   const handlePrevQuestion = () => {
     if (currentQuestionIndex > 0) {
       setCurrentQuestionIndex(prev => prev - 1);
-      setQuizFeedback(null); setHintLevel(0);
-      setFreeTextAnswer(''); setShowSampleAnswer(false); setCustomSelection(null);
+      resetQuizUi();
     }
   };
 
@@ -397,56 +563,62 @@ export default function App() {
   };
 
   const handleExtractAnswer = () => {
+    if (extractLocked || quizFeedback === 'correct') return;
     const selectedText = getSelectedText().trim();
     if (!selectedText) {
       alert('本文の文字をタッチして選んでからボタンを押してね！');
       return;
     }
     if (currentQuestion?.type === 'extract' && Array.isArray(currentQuestion.answer)) {
-      const charCount = currentQuestion.charCount;
-      const isCorrect = currentQuestion.answer.some(ans => {
-        const sel = selectedText;
-        const a = ans.trim();
-        if (charCount) {
-          // 文字数指定問題: 文字数が一致し、かつテキストが一致すること
-          return sel.length === charCount && sel === a;
-        }
-        // 通常のぬき出し: 正解の±20%（最低2文字）のトレランス
-        if (sel === a) return true;
-        const tolerance = Math.max(2, Math.ceil(a.length * 0.2));
-        // 選択が正解の一部（正解の80%以上を選んでいればOK）
-        if (a.includes(sel) && sel.length >= a.length - tolerance) return true;
-        // 選択が正解より少しだけ長い（境界タップのずれ許容）
-        if (sel.includes(a) && sel.length <= a.length + tolerance) return true;
-        return false;
-      });
+      const verdict = judgeExtract(currentQuestion, selectedText);
+      const isCorrect = verdict === 'ok';
+      setExtractNote(verdict === 'long' || verdict === 'short' ? verdict : null);
+      if (!isCorrect) setExtractTries(n => n + 1);
       setQuizFeedback(isCorrect ? 'correct' : 'incorrect');
+      noteTestResult(currentQuestion.id, isCorrect);
       if (isCorrect) {
         recordCorrect(currentQuestion.id);
       } else {
         recordWrong(currentQuestion.id);
-        if (hintLevel === 0) setHintLevel(1);
+        if (hintLevel === 0 && !isTest) setHintLevel(1);
       }
     }
     setCustomSelection(null);
   };
 
   const handleChoiceAnswer = (choiceIndex: number) => {
+    if (isTest && quizFeedback) return;
+    if (quizFeedback === 'correct' || wrongChoices.includes(choiceIndex)) return;
     if (currentQuestion?.type === 'choice') {
       const isCorrect = currentQuestion.answer === choiceIndex;
       setQuizFeedback(isCorrect ? 'correct' : 'incorrect');
+      setLastChoice(choiceIndex);
+      // 同じまちがいを連打できないように、えらんだまちがいは押せなくする
+      if (!isCorrect) setWrongChoices(prev => [...prev, choiceIndex]);
+      noteTestResult(currentQuestion.id, isCorrect);
       if (isCorrect) {
         recordCorrect(currentQuestion.id);
       } else {
         recordWrong(currentQuestion.id);
-        if (hintLevel === 0) setHintLevel(1);
+        if (hintLevel === 0 && !isTest) setHintLevel(1);
       }
     }
   };
 
+  // 記述は自動で採点できないので、解答例と「ポイント」を見くらべて自分で決める
   const handleFreeTextSubmit = () => {
     setShowSampleAnswer(true);
-    if (currentQuestion) recordCorrect(currentQuestion.id);
+    setSelfCheck(null);
+  };
+  const handleSelfCheck = (ok: boolean) => {
+    if (!currentQuestion || selfCheck) return;
+    setSelfCheck(ok ? 'ok' : 'retry');
+    if (ok) {
+      recordCorrect(currentQuestion.id);
+    } else {
+      recordWrong(currentQuestion.id);
+      showMascot('encouraging', 'ポイントを入れて、書き直してみよう！');
+    }
   };
 
   const handleTouchMove = (e: ReactTouchEvent) => {
@@ -502,7 +674,7 @@ export default function App() {
     const chip = contrastChips.find(c => c.id === selectedChipId);
     if (!chip) return;
     if (chip.correctCell === cell) {
-      setPlacedChips(prev => ({ ...prev, [cell]: [...prev[cell], chip.id] }));
+      setPlacedChips(prev => ({ ...prev, [cell]: [...(prev[cell] ?? []), chip.id] }));
       setContrastFeedback({ cell, ok: true });
     } else {
       setContrastFeedback({ cell, ok: false });
@@ -511,13 +683,11 @@ export default function App() {
     setTimeout(() => setContrastFeedback(null), 800);
   };
   const handleResetContrast = () => {
-    setPlacedChips({ 'war-life': [], 'war-cosmos': [], 'after-life': [], 'after-cosmos': [] });
+    setPlacedChips(emptyCells());
     setSelectedChipId(null);
     setContrastFeedback(null);
   };
-  const contrastComplete =
-    placedChips['war-life'].length === 1 && placedChips['war-cosmos'].length === 1 &&
-    placedChips['after-life'].length === 1 && placedChips['after-cosmos'].length === 1;
+  const contrastComplete = CELLS.every(c => (placedChips[c] ?? []).length === 1);
 
   // ── renderText ──────────────────────────────────────────────────────────────
   // In review mode we show the page the current review question belongs to
@@ -659,7 +829,19 @@ export default function App() {
         cycleCount={cycleCount}
         masterCount={masterCount}
         cycleBadgeInfo={cycleBadge(cycleCount)}
-        onStart={() => setScreen('learn')}
+        weakSkillLabel={weakSkill ? SKILLS[weakSkill].label : null}
+        sceneProgress={pages.map(p => {
+          const qs = questions.filter(q => q.pageId === p.id);
+          return { title: p.pageNumber, label: p.paragraphRange, solved: qs.filter(q => solvedQuestions.includes(q.id)).length, total: qs.length };
+        })}
+        onStart={() => { setReviewMode(false); setScreen('learn'); }}
+        onStartScene={handleStartScene}
+        onStartSkill={handleStartSkill}
+        skillProgress={SKILL_ORDER.map(sk => {
+          const qs = questions.filter(q => q.skill === sk);
+          return { skill: sk, label: SKILLS[sk].label, desc: SKILLS[sk].desc, solved: qs.filter(q => solvedQuestions.includes(q.id)).length, total: qs.length, weak: sk === weakSkill };
+        })}
+        onStartTest={handleStartTest}
         onReview={handleStartReview}
         onShowOnboarding={() => setScreen('onboarding')}
       />
@@ -678,6 +860,21 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-stone-50 flex flex-col font-sans text-stone-800">
+      {/* まとめテストの結果 */}
+      <AnimatePresence>
+        {showTestResult && (
+          <TestResult
+            questions={testQuestions}
+            results={testResults}
+            onRedo={() => {
+              setShowTestResult(false);
+              startSession('review', testQuestions.filter(q => !testResults[q.id]));
+            }}
+            onClose={() => { setShowTestResult(false); setScreen('title'); }}
+          />
+        )}
+      </AnimatePresence>
+
       {/* All Clear Modal */}
       <AnimatePresence>
         {showAllClear && (
@@ -749,10 +946,10 @@ export default function App() {
           </button>
           <div className="min-w-0">
             <h1 className="text-base lg:text-lg font-bold text-stone-700 flex items-center gap-1.5 truncate">
-              <Flower2 className="text-pink-500 shrink-0" size={18} aria-label="コスモス" />
-              一つの花
+              <PawPrint className="text-orange-500 shrink-0" size={18} aria-label="きつね" />
+              {UNIT.title}
             </h1>
-            <p className="text-[10px] text-stone-500 ml-6 truncate">今西 祐行 ／ 光村図書 4年</p>
+            <p className="text-[10px] text-stone-500 ml-6 truncate">{UNIT.author} ／ {UNIT.publisher}</p>
           </div>
           <div className="flex items-center gap-1.5 ml-1 shrink-0">
             <div className={`flex items-center gap-1 px-2 py-1 rounded-full font-bold border-2 text-xs ${cycleBadge(cycleCount).cls}`} title={`現在 ${cycleBadge(cycleCount).label}`}>
@@ -773,8 +970,8 @@ export default function App() {
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {reviewMode && (
-            <div className="flex items-center gap-1 bg-amber-100 text-amber-700 px-2 py-1 rounded-full text-xs font-bold border border-amber-200">
-              <RotateCcw size={12} />
+            <div className={`flex items-center gap-1 px-2 py-1 rounded-full text-xs font-bold border ${isTest ? 'bg-stone-800 text-white border-stone-800' : 'bg-amber-100 text-amber-700 border-amber-200'}`}>
+              {isTest ? <ClipboardCheck size={12} /> : sessionKind === 'skill' ? <Target size={12} /> : <RotateCcw size={12} />}
               {reviewIdx + 1}/{reviewQueue.length}
             </div>
           )}
@@ -783,7 +980,7 @@ export default function App() {
             <ModeButton active={mode === 'quiz' || reviewMode} onClick={() => { setReviewMode(false); setMode('quiz'); }} icon={<HelpCircle size={16} />} label="問題" color="amber" />
             <ModeButton active={mode === 'kanji'} onClick={() => { setReviewMode(false); setMode('kanji'); }} icon={<PenTool size={16} />} label="漢字" color="indigo" />
             <ModeButton active={mode === 'structure'} onClick={() => { setReviewMode(false); setMode('structure'); }} icon={<Layers size={16} />} label="場面" color="emerald" />
-            <ModeButton active={mode === 'contrast'} onClick={() => { setReviewMode(false); setMode('contrast'); }} icon={<GitCompare size={16} />} label="対比" color="pink" />
+            <ModeButton active={mode === 'contrast'} onClick={() => { setReviewMode(false); setMode('contrast'); }} icon={<GitCompare size={16} />} label="対比" color="orange" />
           </div>
         </div>
       </header>
@@ -857,8 +1054,12 @@ export default function App() {
               {reviewMode && (
                 <div className="flex-1 flex flex-col">
                   <div className="flex justify-between items-center mb-3 pb-2 border-b border-amber-100">
-                    <h2 className="text-xl font-bold text-amber-600 flex items-center gap-2">
-                      <RotateCcw /> ふりかえり問題 {reviewIdx + 1} / {reviewQueue.length}
+                    <h2 className={`text-xl font-bold flex items-center gap-2 ${isTest ? 'text-stone-800' : 'text-amber-600'}`}>
+                      {isTest
+                        ? <><ClipboardCheck /> まとめテスト {reviewIdx + 1} / {reviewQueue.length}</>
+                        : sessionKind === 'skill' && sessionSkill
+                        ? <><Target /> {SKILLS[sessionSkill].label} {reviewIdx + 1} / {reviewQueue.length}</>
+                        : <><RotateCcw /> ふりかえり問題 {reviewIdx + 1} / {reviewQueue.length}</>}
                     </h2>
                     {quizQuestion && (() => {
                       const cnt = clearCount[quizQuestion.id] ?? 0;
@@ -882,18 +1083,28 @@ export default function App() {
                     freeTextAnswer={freeTextAnswer}
                     showSampleAnswer={showSampleAnswer}
                     selectedCharCount={selectedCharCount}
+                    testMode={isTest}
+                    lastChoice={lastChoice}
+                    wrongChoices={wrongChoices}
+                    extractTries={extractTries}
+                    extractLocked={extractLocked}
+                    extractNote={extractNote}
+                    lateCorrect={lateCorrect}
+                    selfCheck={selfCheck}
                     onExtract={handleExtractAnswer}
                     onChoice={handleChoiceAnswer}
                     onFreeTextChange={setFreeTextAnswer}
                     onFreeTextSubmit={handleFreeTextSubmit}
+                    onSelfCheck={handleSelfCheck}
                     onHint={handleHint}
                   />}
                   <div className="mt-4 pt-4 border-t border-amber-100 flex justify-end">
                     <button
                       onClick={handleReviewNext}
-                      className="px-6 py-2 bg-amber-500 hover:bg-amber-600 text-white font-bold rounded-full transition-colors flex items-center gap-1"
+                      disabled={isTest && !quizFeedback}
+                      className={`px-6 py-2 text-white font-bold rounded-full transition-colors flex items-center gap-1 disabled:opacity-40 ${isTest ? 'bg-stone-800 hover:bg-stone-900' : 'bg-amber-500 hover:bg-amber-600'}`}
                     >
-                      {reviewIdx < reviewQueue.length - 1 ? '次の問題' : 'ふりかえり完了'} <ChevronRight size={18} />
+                      {reviewIdx < reviewQueue.length - 1 ? '次の問題' : isTest ? '結果を見る' : sessionKind === 'skill' ? 'おわる' : 'ふりかえり完了'} <ChevronRight size={18} />
                     </button>
                   </div>
                 </div>
@@ -911,8 +1122,8 @@ export default function App() {
                   </div>
 
                   <div className="flex items-center gap-2 mb-3">
-                    <span className={`text-xs font-bold px-2 py-1 rounded-full ${SECTION_BADGE[readPara.section]}`}>
-                      {SECTION_LABEL[readPara.section]}
+                    <span className={`text-xs font-bold px-2 py-1 rounded-full ${SECTION_BADGE(readPara.section)}`}>
+                      {SECTION_LABEL(readPara.section)}
                     </span>
                     <span className="text-sm font-bold text-stone-700">{readPara.role}</span>
                   </div>
@@ -952,7 +1163,7 @@ export default function App() {
                   {readPara.feeling && (
                     <div className="mt-4 bg-rose-50 border border-rose-200 rounded-xl p-3 text-sm">
                       <div className="font-bold text-rose-600 mb-1 flex items-center gap-1">
-                        <Sprout size={15} /> 読みどころ（{WHO_LABEL[readPara.feeling.who]}）
+                        <Sprout size={15} /> 読みどころ（{whoLabel(readPara.feeling.who)}）
                       </div>
                       <p className="text-stone-700">{readPara.feeling.point}</p>
                     </div>
@@ -990,10 +1201,19 @@ export default function App() {
                       freeTextAnswer={freeTextAnswer}
                       showSampleAnswer={showSampleAnswer}
                       selectedCharCount={selectedCharCount}
+                      testMode={false}
+                      lastChoice={lastChoice}
+                      wrongChoices={wrongChoices}
+                      extractTries={extractTries}
+                      extractLocked={extractLocked}
+                      extractNote={extractNote}
+                      lateCorrect={lateCorrect}
+                      selfCheck={selfCheck}
                       onExtract={handleExtractAnswer}
                       onChoice={handleChoiceAnswer}
                       onFreeTextChange={setFreeTextAnswer}
                       onFreeTextSubmit={handleFreeTextSubmit}
+                      onSelfCheck={handleSelfCheck}
                       onHint={handleHint}
                     />
                   ) : (
@@ -1072,17 +1292,19 @@ export default function App() {
                 <div className="flex-1 flex flex-col">
                   <div className="flex justify-between items-center mb-3 pb-2 border-b border-emerald-100">
                     <h2 className="text-xl font-bold text-emerald-600 flex items-center gap-2">
-                      <Layers /> 場面の組み立てマップ
+                      <Layers /> {STRUCTURE.title}
                     </h2>
-                    <span className="bg-emerald-100 text-emerald-700 px-3 py-1 rounded-full text-xs font-bold">時の流れで読む</span>
+                    <span className="bg-emerald-100 text-emerald-700 px-3 py-1 rounded-full text-xs font-bold">{STRUCTURE.tag}</span>
                   </div>
                   <p className="text-stone-600 mb-4 text-sm">
-                    物語の場面のはたらきを見てみよう。カードをタップすると、左の本文へジャンプし、<span className="text-emerald-700 font-bold">読みどころ</span>が開くよ。
-                    <span className="text-orange-600 font-bold">戦争中</span>・<span className="text-rose-600 font-bold">別れ</span>・<span className="text-emerald-600 font-bold">十年後</span>で色分けされているよ。
+                    {STRUCTURE.intro}
+                    {Object.values(SECTIONS).map((sec, i) => (
+                      <span key={sec.label}>{i > 0 ? '・' : ''}<span className={`${sec.text} font-bold`}>{sec.label}</span></span>
+                    ))}で色分けされているよ。
                   </p>
                   <div className="flex flex-col gap-3">
                     {structure.map(p => {
-                      const tone = SECTION_COLOR[p.section];
+                      const tone = SECTION_COLOR(p.section);
                       const isExpanded = expandedPara === p.num;
                       return (
                         <button
@@ -1096,14 +1318,14 @@ export default function App() {
                             </div>
                             <div className="flex-1">
                               <div className="flex items-center gap-2 mb-1">
-                                <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${SECTION_BADGE[p.section]}`}>{SECTION_LABEL[p.section]}</span>
+                                <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${SECTION_BADGE(p.section)}`}>{SECTION_LABEL(p.section)}</span>
                                 <span className="font-bold text-stone-700">{p.role}</span>
                               </div>
                               <div className="text-sm text-stone-600">{p.summary}</div>
                               {isExpanded && p.feeling && (
                                 <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="mt-3 flex flex-col gap-2">
                                   <div className="bg-white/80 rounded-lg p-2 border border-emerald-200">
-                                    <div className="text-xs font-bold text-emerald-700 mb-1">読みどころ（{WHO_LABEL[p.feeling.who]}の気持ち）</div>
+                                    <div className="text-xs font-bold text-emerald-700 mb-1">読みどころ（{whoLabel(p.feeling.who)}の気持ち）</div>
                                     <div className="text-xs text-stone-700">{p.feeling.point}</div>
                                   </div>
                                   <div className="bg-white/80 rounded-lg p-2 border border-amber-200">
@@ -1123,26 +1345,29 @@ export default function App() {
 
               {!reviewMode && mode === 'contrast' && (
                 <div className="flex-1 flex flex-col">
-                  <h2 className="text-xl font-bold text-pink-600 flex items-center gap-2 mb-3 pb-2 border-b border-pink-100">
-                    <GitCompare /> 戦争中 ⇄ 十年後 対比表
+                  <h2 className="text-xl font-bold text-orange-600 flex items-center gap-2 mb-3 pb-2 border-b border-orange-100">
+                    <GitCompare /> {CONTRAST.title}
                   </h2>
                   <p className="text-stone-600 text-sm mb-4">
                     下の<strong>カード</strong>をタップ → <strong>表のマス</strong>をタップ で入れていこう。<br />
-                    「くらし（食べ物）」と「コスモス（お父さんの花）」が、戦争中と十年後でどう変わったか整理しよう。
+                    {CONTRAST.guide}
                   </p>
 
-                  <div className="grid grid-cols-3 gap-2 mb-4">
+                  <div className="grid gap-2 mb-4" style={{ gridTemplateColumns: `auto repeat(${CONTRAST.cols.length}, minmax(0, 1fr))` }}>
                     <div></div>
-                    <div className="text-center text-xs font-bold text-amber-700 bg-amber-50 rounded-lg py-2 flex items-center justify-center">くらし<br />（食べ物）</div>
-                    <div className="text-center text-xs font-bold text-pink-700 bg-pink-50 rounded-lg py-2 flex items-center justify-center">コスモス<br />（花）</div>
-
-                    <div className="flex items-center justify-center text-sm font-bold text-orange-700 bg-orange-100 rounded-lg">戦争中</div>
-                    <Cell2x2 cell="war-life" placed={placedChips} chips={contrastChips} feedback={contrastFeedback} onPlace={handlePlaceChip} />
-                    <Cell2x2 cell="war-cosmos" placed={placedChips} chips={contrastChips} feedback={contrastFeedback} onPlace={handlePlaceChip} />
-
-                    <div className="flex items-center justify-center text-sm font-bold text-emerald-700 bg-emerald-100 rounded-lg">十年後</div>
-                    <Cell2x2 cell="after-life" placed={placedChips} chips={contrastChips} feedback={contrastFeedback} onPlace={handlePlaceChip} />
-                    <Cell2x2 cell="after-cosmos" placed={placedChips} chips={contrastChips} feedback={contrastFeedback} onPlace={handlePlaceChip} />
+                    {CONTRAST.cols.map(c => (
+                      <div key={c.key} className={`text-center text-xs font-bold rounded-lg py-2 px-1 flex items-center justify-center whitespace-pre-line ${c.cls}`}>{c.label}</div>
+                    ))}
+                    {CONTRAST.rows.map(r => (
+                      <Fragment key={r.key}>
+                        <div className={`flex items-center justify-center text-sm font-bold rounded-lg px-2 ${r.cls}`}>{r.label}</div>
+                        {CONTRAST.cols.map(c => (
+                          <Fragment key={c.key}>
+                            <Cell2x2 cell={`${r.key}-${c.key}`} border={c.border} placed={placedChips} chips={contrastChips} feedback={contrastFeedback} onPlace={handlePlaceChip} />
+                          </Fragment>
+                        ))}
+                      </Fragment>
+                    ))}
                   </div>
 
                   <div className="mb-4">
@@ -1166,13 +1391,9 @@ export default function App() {
                   </div>
 
                   {contrastComplete && (
-                    <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mt-auto bg-pink-50 border border-pink-200 rounded-xl p-4">
-                      <p className="font-bold text-pink-700 mb-1">完成！この物語の主題は——</p>
-                      <p className="text-stone-700 text-sm">
-                        くらし（食べ物）は「物がない戦争中」から「豊かな十年後」へ大きく<strong>変わった</strong>。
-                        でも、お父さんがくれた<strong>「一輪」のコスモスが「いっぱい」に増えた</strong>ように、
-                        ゆみ子を思うお父さんの愛と平和への願いは、形を変えて今も<strong>変わらず</strong>ゆみ子を包んでいる。
-                      </p>
+                    <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mt-auto bg-orange-50 border border-orange-200 rounded-xl p-4">
+                      <p className="font-bold text-orange-700 mb-1">{CONTRAST.summaryTitle}</p>
+                      <p className="text-stone-700 text-sm"><Bold text={CONTRAST.summary} /></p>
                     </motion.div>
                   )}
 
@@ -1199,10 +1420,19 @@ function QuizBody({
   freeTextAnswer,
   showSampleAnswer,
   selectedCharCount,
+  testMode,
+  lastChoice,
+  wrongChoices,
+  extractTries,
+  extractLocked,
+  extractNote,
+  lateCorrect,
+  selfCheck,
   onExtract,
   onChoice,
   onFreeTextChange,
   onFreeTextSubmit,
+  onSelfCheck,
   onHint,
 }: {
   question: Question;
@@ -1213,14 +1443,41 @@ function QuizBody({
   freeTextAnswer: string;
   showSampleAnswer: boolean;
   selectedCharCount: number;
+  testMode: boolean;
+  lastChoice: number | null;
+  wrongChoices: number[];
+  extractTries: number;
+  extractLocked: boolean;
+  extractNote: 'long' | 'short' | null;
+  lateCorrect: boolean;
+  selfCheck: 'ok' | 'retry' | null;
   onExtract: () => void;
   onChoice: (idx: number) => void;
   onFreeTextChange: (v: string) => void;
   onFreeTextSubmit: () => void;
+  onSelfCheck: (ok: boolean) => void;
   onHint: () => void;
 }) {
+  // テストでは1回答えたら次へ。ふだんは何度でもやり直せる
+  const locked = testMode && quizFeedback !== null;
+  // 選択肢の並びは、出すたびに入れかえる（「答えは③」と位置で覚えてしまうのを防ぐ）
+  const order = useMemo(
+    () => shuffle((question.choices ?? []).map((_, i) => i)),
+    [question.id], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  // 答えを見せる：テストでまちがえたとき／ぬき出しを出しきったとき
+  const showAnswer = (locked && quizFeedback === 'incorrect') || extractLocked;
+  const misread = quizFeedback === 'incorrect' && question.type === 'choice' && lastChoice !== null
+    ? question.misread?.[lastChoice] ?? null
+    : null;
   return (
-    <div className="flex-1 flex flex-col gap-6">
+    <div className="flex-1 flex flex-col gap-5">
+      <div className="flex items-center gap-2 -mb-2">
+        <span className={`text-xs font-bold px-2.5 py-1 rounded-full border ${SKILL_CHIP[question.skill]}`}>
+          {SKILLS[question.skill].label}
+        </span>
+        <span className="text-xs text-stone-400">{pages.find(p => p.id === question.pageId)?.paragraphRange}</span>
+      </div>
       <div className="bg-amber-50 p-6 rounded-xl text-lg font-medium text-stone-800 leading-relaxed whitespace-pre-line">
         {question.question}
       </div>
@@ -1258,9 +1515,12 @@ function QuizBody({
             </div>
           )}
 
+          {!testMode && question.charCount === undefined && extractTries > 0 && !extractLocked && quizFeedback !== 'correct' && (
+            <p className="text-xs text-stone-500">あと{EXTRACT_MAX_TRIES - extractTries}回 答えられるよ</p>
+          )}
           <button
             onClick={onExtract}
-            disabled={selectedCharCount === 0}
+            disabled={selectedCharCount === 0 || locked || extractLocked || quizFeedback === 'correct'}
             className="bg-amber-500 hover:bg-amber-600 text-white font-bold py-4 px-8 rounded-full shadow-md transition-transform active:scale-95 text-lg w-full max-w-md disabled:opacity-40"
           >
             選んだ文字で答える
@@ -1270,15 +1530,25 @@ function QuizBody({
 
       {question.type === 'choice' && (
         <div className="flex flex-col gap-3">
-          {question.choices?.map((choice, idx) => (
-            <button
-              key={idx}
-              onClick={() => onChoice(idx)}
-              className="text-left p-4 rounded-xl border-2 border-stone-200 hover:border-amber-400 hover:bg-amber-50 transition-colors font-medium text-stone-700"
-            >
-              {choice}
-            </button>
-          ))}
+          {order.map((idx, pos) => {
+            const choice = question.choices![idx]!;
+            const picked = quizFeedback !== null && lastChoice === idx;
+            const struck = wrongChoices.includes(idx);
+            const tone = picked
+              ? quizFeedback === 'correct' ? 'border-green-400 bg-green-50' : 'border-red-300 bg-red-50'
+              : struck ? 'border-stone-200 bg-stone-100 opacity-50'
+              : 'border-stone-200 hover:border-amber-400 hover:bg-amber-50';
+            return (
+              <button
+                key={idx}
+                onClick={() => onChoice(idx)}
+                disabled={locked || struck || quizFeedback === 'correct'}
+                className={`text-left p-4 rounded-xl border-2 transition-colors font-medium text-stone-700 disabled:cursor-default ${tone}`}
+              >
+                <span className="text-stone-400 mr-1">{'①②③④'.charAt(pos)}</span>{choice}
+              </button>
+            );
+          })}
         </div>
       )}
 
@@ -1298,10 +1568,29 @@ function QuizBody({
             答え合わせをする
           </button>
           {showSampleAnswer && (
-            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="bg-green-50 p-4 rounded-xl border border-green-200">
-              <p className="text-green-800 font-bold mb-2">解答例：</p>
-              <p className="text-green-700">{question.sampleAnswer}</p>
-              <p className="text-sm text-green-600 mt-2">※自分の考えと似ているところはあるかな？</p>
+            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="bg-green-50 p-4 rounded-xl border border-green-200 flex flex-col gap-3">
+              <div>
+                <p className="text-green-800 font-bold mb-1">解答例</p>
+                <p className="text-green-700">{question.sampleAnswer}</p>
+              </div>
+              {question.points && (
+                <div className="bg-white rounded-lg p-3 border border-green-200">
+                  <p className="text-green-800 font-bold text-sm mb-1">ここが書けていればOK</p>
+                  <ul className="text-sm text-stone-700 list-none flex flex-col gap-1">
+                    {question.points.map(pt => <li key={pt}>□ {pt}</li>)}
+                  </ul>
+                </div>
+              )}
+              {selfCheck === null ? (
+                <div className="flex gap-2">
+                  <button onClick={() => onSelfCheck(true)} className="flex-1 bg-green-500 hover:bg-green-600 text-white font-bold py-2 rounded-full">書けた！</button>
+                  <button onClick={() => onSelfCheck(false)} className="flex-1 bg-white border-2 border-green-300 text-green-700 font-bold py-2 rounded-full">もう少し</button>
+                </div>
+              ) : (
+                <p className="text-sm font-bold text-green-700">
+                  {selfCheck === 'ok' ? 'よし！ 次の問題へ進もう。' : '足りないポイントを入れて書き直したら、もう一度「答え合わせ」をおそう。'}
+                </p>
+              )}
             </motion.div>
           )}
         </div>
@@ -1314,12 +1603,44 @@ function QuizBody({
           className={`p-4 rounded-xl flex items-center gap-3 font-bold text-lg ${quizFeedback === 'correct' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}
         >
           {quizFeedback === 'correct' ? <CheckCircle2 size={28} /> : <XCircle size={28} />}
-          {quizFeedback === 'correct' ? '大正解！よくできました！' : 'ざんねん、もう一度考えてみよう！'}
+          {quizFeedback === 'correct' ? '大正解！よくできました！' : testMode ? 'ざんねん！' : 'ざんねん、もう一度考えてみよう！'}
         </motion.div>
       )}
 
+      {/* まちがえた選択肢の「読みまちがいの型」 */}
+      {misread && (
+        <div className="bg-orange-50 border border-orange-200 rounded-xl p-3 text-sm text-orange-800">
+          <span className="font-bold">読み方のコツ：</span>{MISREADS[misread].advice}
+        </div>
+      )}
+
+      {/* ぬき出しで、選び方そのものがずれているとき */}
+      {quizFeedback === 'incorrect' && extractNote && (
+        <div className="bg-orange-50 border border-orange-200 rounded-xl p-3 text-sm text-orange-800">
+          <span className="font-bold">読み方のコツ：</span>
+          {extractNote === 'long'
+            ? '長く選びすぎだよ。問題にぴったり合う部分だけを選ぼう。'
+            : '短すぎるよ。答えになる言葉を、切れ目まで選ぼう。'}
+        </div>
+      )}
+
+      {/* まちがえたあとで当てた正解は、メダルにしない */}
+      {quizFeedback === 'correct' && lateCorrect && (
+        <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 text-sm text-sky-800">
+          まちがえたあとの正解なので、メダルはまだだよ。あした以降の「ふりかえり」で、1回でとけたらもらえるよ。
+        </div>
+      )}
+
+      {/* テストでまちがえたとき・ぬき出しを出しきったときは、答えを見せて次へ */}
+      {showAnswer && (
+        <div className="bg-stone-100 border border-stone-200 rounded-xl p-3 text-sm text-stone-700">
+          {extractLocked && !testMode && <p className="font-bold mb-1">{EXTRACT_MAX_TRIES}回まちがえたので、答えをたしかめて、本文を読み直そう。</p>}
+          <span className="font-bold">答え：</span>{answerText(question)}
+        </div>
+      )}
+
       {/* Tiered hint */}
-      {hintLevel > 0 && hintText && (
+      {!testMode && !extractLocked && hintLevel > 0 && hintText && (
         <div className="bg-indigo-50 p-4 rounded-xl border border-indigo-100 flex gap-3 text-indigo-800">
           <Lightbulb className="shrink-0 text-indigo-500 mt-1" />
           <div>
@@ -1329,7 +1650,7 @@ function QuizBody({
         </div>
       )}
 
-      {hintLevel < 3 && (
+      {!testMode && !extractLocked && quizFeedback !== 'correct' && hintLevel < 3 && (
         <button
           onClick={onHint}
           className="flex items-center gap-2 self-start text-indigo-500 hover:text-indigo-700 text-sm font-bold border border-indigo-200 hover:border-indigo-400 rounded-full px-4 py-2 transition-colors"
@@ -1342,20 +1663,90 @@ function QuizBody({
   );
 }
 
+// ── TestResult ───────────────────────────────────────────────────────────────
+// まとめテストの結果。点数や割合ではなく「読みの力ごとに、いくつできたか」と
+// 「つぎに何をするか」を出す（学級ポータル全体の方針）。
+function TestResult({
+  questions: qs, results, onRedo, onClose,
+}: {
+  questions: Question[];
+  results: Record<number, boolean>;
+  onRedo: () => void;
+  onClose: () => void;
+}) {
+  const done = qs.filter(q => results[q.id]).length;
+  const wrong = qs.filter(q => !results[q.id]);
+  const rows = SKILL_ORDER
+    .map(s => ({ s, total: qs.filter(q => q.skill === s).length, ok: qs.filter(q => q.skill === s && results[q.id]).length }))
+    .filter(r => r.total > 0);
+  const weak = rows.filter(r => r.ok < r.total).sort((a, b) => (a.ok / a.total) - (b.ok / b.total))[0];
+  const weakScenes = [...new Set(wrong.map(q => pages.find(p => p.id === q.pageId)?.paragraphRange))].filter(Boolean);
+  return (
+    <motion.div
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+    >
+      <motion.div
+        initial={{ scale: 0.9, y: 30 }} animate={{ scale: 1, y: 0 }}
+        className="bg-white rounded-3xl p-6 flex flex-col items-center gap-4 shadow-2xl max-w-md w-full max-h-[90vh] overflow-y-auto"
+      >
+        <MascotPinto expression={wrong.length === 0 ? 'celebrating' : 'happy'} size={96} />
+        <h2 className="text-2xl font-black text-stone-800">まとめテスト おわり！</h2>
+        <p className="text-stone-600">{qs.length}問中 <span className="font-black text-orange-600 text-xl">{done}問</span> できたよ</p>
+
+        <div className="w-full flex flex-col gap-2">
+          {rows.map(r => (
+            <div key={r.s} className="flex items-center gap-2">
+              <span className={`text-xs font-bold px-2 py-1 rounded-full border w-36 text-center shrink-0 ${SKILL_CHIP[r.s]}`}>{SKILLS[r.s].label}</span>
+              <span className="flex gap-1">
+                {Array.from({ length: r.total }, (_, i) => (
+                  <span key={i} className={`w-5 h-5 rounded-full border-2 ${i < r.ok ? 'bg-orange-400 border-orange-400' : 'border-stone-300'}`} />
+                ))}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {weak ? (
+          <div className="w-full bg-orange-50 border border-orange-200 rounded-xl p-3 text-sm text-stone-700">
+            <p className="font-bold text-orange-700 mb-1">つぎにやること</p>
+            <p>「{SKILLS[weak.s].label}」の問題をもう一度。{SKILLS[weak.s].desc}ようになろう。</p>
+            {weakScenes.length > 0 && <p className="mt-1">読み直すとよい場面：{weakScenes.join('・')}</p>}
+          </div>
+        ) : (
+          <p className="text-sm font-bold text-emerald-600">ぜんぶできた！ テストもばっちりだね。</p>
+        )}
+
+        <div className="w-full flex flex-col gap-2">
+          {wrong.length > 0 && (
+            <button onClick={onRedo} className="w-full bg-amber-500 hover:bg-amber-600 text-white font-bold py-3 rounded-full">
+              まちがえた{wrong.length}問を、ヒントつきでやり直す
+            </button>
+          )}
+          <button onClick={onClose} className="w-full bg-stone-200 hover:bg-stone-300 text-stone-700 font-bold py-2 rounded-full text-sm">
+            タイトルへもどる
+          </button>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+}
+
 // ── Cell2x2 ──────────────────────────────────────────────────────────────────
 function Cell2x2({
-  cell, placed, chips, feedback, onPlace
+  cell, border, placed, chips, feedback, onPlace
 }: {
   cell: Cell;
+  border: string;
   placed: Record<Cell, number[]>;
   chips: ContrastChip[];
   feedback: { cell: Cell; ok: boolean } | null;
   onPlace: (cell: Cell) => void;
 }) {
-  const chipId = placed[cell][0];
+  const chipId = (placed[cell] ?? [])[0];
   const chip = chipId != null ? chips.find(c => c.id === chipId) : null;
   const fb = feedback && feedback.cell === cell ? feedback : null;
-  const baseColor = cell.endsWith('-cosmos') ? 'border-pink-200' : 'border-amber-200';
+  const baseColor = border;
   const flash =
     fb?.ok === false ? 'bg-red-200 border-red-400 animate-pulse' :
     fb?.ok === true ? 'bg-green-100 border-green-400' :
@@ -1382,19 +1773,19 @@ function ModeButton({
   onClick: () => void;
   icon: ReactNode;
   label: string;
-  color: 'emerald' | 'amber' | 'indigo' | 'pink';
+  color: 'emerald' | 'amber' | 'indigo' | 'orange';
 }) {
   const colorMap: Record<typeof color, string> = {
     emerald: 'bg-emerald-500 text-white shadow-md',
     amber: 'bg-amber-500 text-white shadow-md',
     indigo: 'bg-indigo-500 text-white shadow-md',
-    pink: 'bg-pink-500 text-white shadow-md',
+    orange: 'bg-orange-500 text-white shadow-md',
   };
   const inactiveColorMap: Record<typeof color, string> = {
     emerald: 'text-emerald-700 hover:bg-emerald-100',
     amber: 'text-amber-700 hover:bg-amber-100',
     indigo: 'text-indigo-700 hover:bg-indigo-100',
-    pink: 'text-pink-700 hover:bg-pink-100',
+    orange: 'text-orange-700 hover:bg-orange-100',
   };
   return (
     <button
